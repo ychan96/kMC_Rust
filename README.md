@@ -193,11 +193,11 @@ MIT License - see [LICENSE](LICENSE) file
 
 ## Contact
 
-- **Author**: Ethan
-- **Email**: your.email@example.com
-- **Issues**: https://github.com/yourusername/kmc_rust/issues
+- **Author**: ychan96
+- **Email**: ethanparkerbros@gmail.com
+- **Issues**: https://github.com/ychan96/kmc_rust/issues
 
 ## Acknowledgments
 
-- Physical chemistry guidance: [Advisor name]
+- Physical chemistry guidance: kyeongsu@kist.re.kr
 - Computational methods: Based on Gillespie algorithm for stochastic simulation
