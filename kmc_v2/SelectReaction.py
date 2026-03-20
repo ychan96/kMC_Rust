@@ -14,6 +14,11 @@ class ReactionMixin:
         counts['dmc'][N]['internal']      -> int
         counts['cracking'][N]['terminal'] -> int
         counts['cracking'][N]['internal'] -> int
+
+    Arrays
+        carbon_array[i]: i-th carbon = 0 or 1
+        hydrogen_array[i]: # of H atoms on i-th carbon 3 or 2
+
     """
 
     def select_reaction(self, counts):
@@ -76,26 +81,18 @@ class ReactionMixin:
         else:
             return False
         
-    def sample_adsorption_site(self, internal_sites, chain_start, chain_length, use_normal=False):
-        """
-        Sample one adsorption site from internal_sites.
-        Defaults to uniform distribution. If use_normal=True, uses a Gaussian 
-        distribution centered at the midpoint.
-        """
-        if not internal_sites:
+    def sample_adsorption_site(self, free_positions, chain_start, chain_length, use_normal=True):
+        if not free_positions:
             return None
 
         if use_normal:
-            # Gaussian logic
-            sigma = chain_length / 12
-            mid = chain_start + (chain_length - 1) / 2
-            weights = stats.norm.pdf(internal_sites, loc=mid, scale=sigma)
+            mid     = chain_start + (chain_length - 1) / 2
+            sigma   = chain_length / 8
+            weights = stats.norm.pdf(free_positions, loc=mid, scale=sigma)
             weights /= weights.sum()
-            selected = np.random.choice(internal_sites, p=weights)
-            return [selected]
+            return int(np.random.choice(free_positions, p=weights))
         else:
-            # Uniform logic: every site has the same probability
-            return internal_sites
+            return int(np.random.choice(free_positions))
     
     def perform_adsorption(self, N):
         # 1. Find all C-N fragments (no adsorbed carbons)
@@ -114,8 +111,9 @@ class ReactionMixin:
         seg   = self.carbon_array[start:start + N]
 
         # 3. Pick one carbon via uniform random (all free carbons equally likely)
-        free_positions = np.where(seg == 0)[0]
-        local_c      = np.random.choice(free_positions)
+        free_positions = list(np.where(seg == 0)[0] + start) #global position
+        sampled = self.sample_adsorption_site(free_positions, start, N, use_normal=True)
+        local_c      = np.random.choice(sampled) - start
         global_c  = start + local_c
         is_terminal    = (local_c == 0) or (local_c == N - 1)
 
@@ -140,260 +138,170 @@ class ReactionMixin:
         vacant_h_sites = np.where(self.h_occupancy == 0)[0]
         if len(vacant_h_sites) < n_h_released:
             return False   # not enough H sites — should be gated in count_sites
-        chosen_h_sites = np.random.choice(vacant_h_sites, size=n_h_released, replace=False)
+        chosen_h_sites = np.random.choice(vacant_h_sites, size=n_h_released, replace=False) #no duplicates
         self.h_occupancy[chosen_h_sites] = 1
         
         return True
-    def _get_chain_info_for_carbon(self, carbon_idx):
-        """
-        Get chain length that this carbon belongs to
-        self.chains comes from the @property in init.py -> it calls _identify_chains() from count_sites.py
-        """
-        for start, end in self.chains: 
-            if start <= carbon_idx < end:
-                return end - start
-        return None
-
-
-    def perform_desorption(self, des_key):
-        """
-        Perform desorption on a single attached carbon.
-        """
-        # Extract target parameters
-        if 'c1' in des_key:
-            target_length = 1
-            is_internal = False
-        elif 'c2' in des_key:
-            target_length = 2
-            is_internal = False
-        elif 'c3' in des_key:
-            target_length = 3
-            is_internal = False
-        elif 'c4' in des_key:
-            target_length = 4
-            is_internal = False
-        else:  # c5plus
-            target_length = 5
-            is_internal = 'internal' in des_key
-        
-        # Collect desorption sites
-        desorption_sites = []
-        
-        for start, end in self.chains:
-            chain_length = end - start
-            chain_segment = self.carbon_array[start:end]
-            
-            # Check chain length match
-            if target_length <= 4:
-                if chain_length != target_length:
-                    continue
-            else:  # C5+
-                if chain_length < 5:
-                    continue
-            
-            # Check exactly one attached
-            num_attached = np.sum(chain_segment == 1)
-            if num_attached != 1:
-                continue
-            
-            # Check no adjacent 1s
-            has_adjacent = np.any((chain_segment[:-1] == 1) & (chain_segment[1:] == 1))
-            if has_adjacent:
-                continue
-            
-            # Find attached position
-            attached_idx = np.where(chain_segment == 1)[0][0]
-            is_terminal_pos = (attached_idx == 0) or (attached_idx == chain_length - 1)
-            
-            # Check position match
-            if target_length <= 4:
-                # C1-C4: add site
-                desorption_sites.append(start + attached_idx)
-            else:  # C5+
-                if is_internal and not is_terminal_pos:
-                    desorption_sites.append(start + attached_idx)
-                elif not is_internal and is_terminal_pos:
-                    desorption_sites.append(start + attached_idx)
-        
-        if not desorption_sites:
-            return False, None
-        
-        # Perform desorption
-        site = random.choice(desorption_sites)
-
-        # Get chain info before clearing
-        chain_info = self._get_chain_info_for_carbon(site)
-        
-        self.carbon_array[site] = 0
-        
-        return True, chain_info  # Return success + info
-
-
     
-    def perform_dmc_formation(self, dmc_key):
-        """
-        Perform double M-C bond formation (dehydrogenation).
-        
-        Args:
-            dmc_key (str): e.g., 'dmc_c2_terminal', 'dmc_c5plus_internal'
-        """
-        # Extract target parameters
-        if 'c2' in dmc_key:
-            target_length = 2
-            is_internal = False
-        elif 'c3' in dmc_key:
-            target_length = 3
-            is_internal = False
-        elif 'c4' in dmc_key:
-            target_length = 4
-            is_internal = 'internal' in dmc_key
-        else:  # c5plus
-            target_length = 5
-            is_internal = 'internal' in dmc_key
-        
-        # Collect dMC formation sites
-        dmc_sites = []
-        
+    def perform_desorption(self, N):
+        # 1. Find all single-MC carbons in length-N fragments
+        candidate_carbons = []
         for start, end in self.chains:
-            chain_length = end - start
-            chain_segment = self.carbon_array[start:end]
-            
-            # Check chain length match
-            if target_length <= 4:
-                if chain_length != target_length:
-                    continue
-            else:  # C5+
-                if chain_length < 5:
-                    continue
-            
-            # Check exactly one attached
-            num_attached = np.sum(chain_segment == 1)
-            if num_attached != 1:
+            if end - start != N: #chain-length matching
                 continue
-            
-            # Find attached position
-            attached_idx = np.where(chain_segment == 1)[0][0]
-            
-            # Check vacant neighbors
-            left_vacant = attached_idx > 0 and chain_segment[attached_idx - 1] == 0
-            right_vacant = attached_idx < chain_length - 1 and chain_segment[attached_idx + 1] == 0
-            
-            if not (left_vacant or right_vacant):
+            seg = self.carbon_array[start:end]
+            if int(np.sum(seg == 1)) != 1: #is it adsorbed??
                 continue
-            
-            # For C2, C3: all positions are "terminal"
-            if target_length in [2, 3]:
-                if left_vacant:
-                    dmc_sites.append(start + attached_idx - 1)
-                if right_vacant:
-                    dmc_sites.append(start + attached_idx + 1)
-            else: 
-                # C4+, C5+: check internal vs terminal
-                if left_vacant:
-                    # Bond at (attached_idx-1, attached_idx)
-                    bond_at_end = (attached_idx - 1 == 0) or (attached_idx == chain_length - 1)
-                    #..001 -> left vacant, but terminal
-                    if is_internal != bond_at_end:
-                        dmc_sites.append(start + attached_idx - 1)
-                
-                if right_vacant:
-                    # Bond at (attached_idx, attached_idx+1)
-                    bond_at_end = (attached_idx == 0) or (attached_idx == chain_length - 2)
-                    #100.. / ..010 -> right vacant True, but terminal
-                    if is_internal != bond_at_end:
-                        dmc_sites.append(start + attached_idx + 1)
-        
-        if not dmc_sites:
-            return False, None
-        
-        # Perform dMC formation
-        site = random.choice(dmc_sites)
+            local_pos  = np.where(seg == 1)[0][0] #accesses the first index array and first index
+            global_c   = start + local_pos
+            site_idx   = self.carbon_to_site[global_c]
+            if site_idx == -1 or self.occupancy[site_idx] != 1:
+                continue
+            candidate_carbons.append((global_c, local_pos, N))
 
-        #get chain info before setting
-        chain_info = self._get_chain_info_for_carbon(site)
+        if not candidate_carbons:
+            return False
 
-        self.carbon_array[site] = 1
-        
-        return True, chain_info
+        # 2. Pick one randomly
+        global_c, local_pos, chain_len = candidate_carbons[np.random.choice(len(candidate_carbons))]
+        is_terminal = (local_pos == 0) or (local_pos == chain_len - 1)
+        site_idx    = self.carbon_to_site[global_c] #find surface site
+
+        # 3. Update carbon arrays
+        self.carbon_array[global_c]   = 0
+        self.hydrogen_array[global_c] = 3 if is_terminal else 2  # restore H count
+
+        # 4. Update C site arrays
+        self.occupancy[site_idx]      = 0
+        self.carbon_at_site[site_idx] = -1
+        self.chain_at_site[site_idx]  = 0
+        self.carbon_to_site[global_c] = -1
+
+        # 5. Return H atoms — free random hollow sites
+        n_h_returned    = 3 if is_terminal else 2
+        occupied_h      = np.where(self.h_occupancy == 1)[0]
+        chosen_h_sites  = np.random.choice(occupied_h, size=n_h_returned, replace=False)
+        self.h_occupancy[chosen_h_sites] = 0
+
+        return True
     
-    def perform_cracking(self, crk_key):
-        """
-        Perform C-C bond scission (cracking).
-        
-        Args:
-            crk_key (str): e.g., 'crk_c2_terminal', 'crk_c4_internal'
-        """
-        # Extract target parameters
-        if 'c2' in crk_key:
-            target_length = 2
-            is_internal = False
-        elif 'c3' in crk_key:
-            target_length = 3
-            is_internal = False
-        elif 'c4' in crk_key:
-            target_length = 4
-            is_internal = 'internal' in crk_key
-        else:  # c5+
-            target_length = 5
-            is_internal = 'internal' in crk_key
-        
-        # Collect cracking sites
-        cracking_sites = []
-        
+    def perform_dmc_formation(self, N, pos):
+        # 1. Find eligible fragments — exactly one single-MC carbon with a free neighbor
+        candidate_pairs = []
         for start, end in self.chains:
-            chain_length = end - start
-            chain_segment = self.carbon_array[start:end]
-            
-            # Check chain length match
-            if target_length <= 4:
-                if chain_length != target_length:
-                    continue
-            else:  # C5+
-                if chain_length < 5:
-                    continue
-            
-            # Find 11 patterns (double M-C bonds)
-            for i in range(chain_length - 1):
-                if chain_segment[i] == 1 and chain_segment[i + 1] == 1:
-                    # Bond at position i (between carbons i and i+1)
-                    bond_position = i
-                    
-                    # For C2, C3: all bonds are "terminal"
-                    if target_length in [2, 3]:
-                        # Break bond by setting chain_array
-                        cracking_sites.append(start + i + 1)  # Position in chain_array
-                    else:  # C4+
-                        # Check if bond is terminal or internal
-                        bond_at_end = (bond_position == 0) or (bond_position == chain_length - 2)
-                        
-                        if is_internal != bond_at_end:
-                            cracking_sites.append(start + i + 1)
+            if end - start != N:
+                continue
+            seg = self.carbon_array[start:end]
+            if int(np.sum(seg == 1)) != 1:
+                continue
 
-        if not cracking_sites:
-            return False, None
-        
-        # Perform cracking
-        chain_index = random.choice(cracking_sites)
+            idx      = np.where(seg == 1)[0][0]
+            site_idx = self.carbon_to_site[start + idx]
+            if site_idx == -1 or self.occupancy[site_idx] != 1:
+                continue
 
-        # Get chain info before breaking
+            # Check vacant surface neighbor exists
+            if not any(self.occupancy[nb] == 0 for nb in self.surface.get_c_neighbors(site_idx)):
+                continue
+
+            for nb_pos in [idx - 1, idx + 1]:
+                if nb_pos < 0 or nb_pos >= N:
+                    continue
+                if seg[nb_pos] != 0:
+                    continue
+                at_terminal = (idx == 0 or idx == N-1 or nb_pos == 0 or nb_pos == N-1)
+                if (pos == 'internal') == (not at_terminal):
+                    candidate_pairs.append((start + idx, start + nb_pos))
+
+        if not candidate_pairs:
+            return False
+
+        # 2. Pick one pair
+        anchor_c, new_c = candidate_pairs[np.random.choice(len(candidate_pairs))]
+        anchor_site     = self.carbon_to_site[anchor_c]
+
+        # 3. Find vacant surface neighbor for new_c
+        vacant_nb = [nb for nb in self.surface.get_c_neighbors(anchor_site)
+                    if self.occupancy[nb] == 0]
+        new_site  = np.random.choice(vacant_nb)
+
+        # 4. Update carbon arrays
+        self.carbon_array[new_c]   = 1
+        self.hydrogen_array[new_c] = 0
+
+        # 5. Update C site arrays
+        self.occupancy[anchor_site]      = 2        # upgrade anchor to dMC
+        self.occupancy[new_site]         = 2
+        self.carbon_at_site[new_site]    = new_c
+        self.chain_at_site[new_site]     = N
+        self.carbon_to_site[new_c]       = new_site
+
+        # 6. Release H atoms
+        n_h_released   = 3 if (new_c == 0 or new_c == N - 1) else 2
+        vacant_h       = np.where(self.h_occupancy == 0)[0]
+        chosen_h       = np.random.choice(vacant_h, size=n_h_released, replace=False)
+        self.h_occupancy[chosen_h] = 1
+
+        return True
+
+
+    def perform_cracking(self, N, pos):
+        # 1. Find eligible 11 patterns
+        candidate_bonds = []
         for start, end in self.chains:
-            if start < chain_index <= end:
-                original_len = end - start
-                # Find cracking position to determine fragments
-                chain_segment = self.carbon_array[start:end]
+            if end - start != N:
+                continue
+            seg = self.carbon_array[start:end]
+            if int(np.sum(seg == 1)) != 2:
+                continue
 
-                #find the 11 pattern
-                for i in range(len(chain_segment) - 1):
-                    if chain_segment[i] == 1 and chain_segment[i + 1] == 1:
-                        #find lengths of two fragments
-                        frag1 = i + 1
-                        frag2 = original_len - frag1
-                        break #breaks once the 11 pattern is found (no need to keep searching)
-                break
-        self.chain_array[chain_index] = 0
-        
-        # Invalidate chain cache
+            for i in range(N - 1):
+                if seg[i] == 1 and seg[i + 1] == 1:
+                    at_terminal = (i == 0) or (i == N - 2)
+                    if (pos == 'internal') == (not at_terminal):
+                        candidate_bonds.append((start, end, start + i + 1))  # chain_array index
+
+        if not candidate_bonds:
+            return False
+
+        # 2. Pick one bond
+        start, end, chain_idx = candidate_bonds[np.random.choice(len(candidate_bonds))]
+        seg       = self.carbon_array[start:end]
+        local_i   = chain_idx - start - 1          # local position of left carbon
+
+        # 3. Compute fragments
+        frag1 = local_i + 1
+        frag2 = N - frag1
+
+        # 4. Get the two carbons
+        g_left  = start + local_i
+        g_right = start + local_i + 1
+        site_l  = self.carbon_to_site[g_left]
+        site_r  = self.carbon_to_site[g_right]
+
+        # 5. Update carbon arrays — both carbons desorb to free state
+        for g_c, site_idx in [(g_left, site_l), (g_right, site_r)]:
+            local_pos = g_c - start
+            is_terminal = (local_pos == 0) or (local_pos == N - 1)
+            self.carbon_array[g_c]        = 0
+            self.hydrogen_array[g_c]      = 3 if is_terminal else 2
+            self.occupancy[site_idx]      = 0
+            self.carbon_at_site[site_idx] = -1
+            self.chain_at_site[site_idx]  = 0
+            self.carbon_to_site[g_c]      = -1
+
+        # 6. Break chain bond
+        self.chain_array[chain_idx] = 0
+
+        # 7. Return H atoms
+        occupied_h = np.where(self.h_occupancy == 1)[0]
+        np.random.choice(occupied_h, size=4, replace=False)  # 2+2 H returned
+        self.h_occupancy[np.random.choice(occupied_h, size=4, replace=False)] = 0
+
+        # 8. Update hydrogen_array for newly exposed terminals at break point
+        self.hydrogen_array[g_left]  = 3   # becomes new terminal of left fragment
+        self.hydrogen_array[g_right] = 3   # becomes new terminal of right fragment
+
         self.invalidate_chains()
-        chain_info = (original_len, frag1, frag2)
-        
-        return True, chain_info
+        return True
+    
